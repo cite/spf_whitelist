@@ -1,60 +1,37 @@
 #!/usr/bin/env ruby
 
-require 'rubygems'
 require 'dnsruby'
 require 'ipaddress'
+require 'logger'
 require 'optparse'
-
-domains = [
-  # freemail provider
-  "gmail.com",
-  "googlemail.com",
-  "gmx.net",
-  "gmx.com",
-  "gmx.de",
-  "web.de",
-  "google.com",
-  "aol.com",
-  "microsoft.com",
-  # social stuff
-  "facebook.com",
-  "twitter.com",
-  "pinterest.com",
-  "instagram.com",
-  "reddit.com",
-  "linkedin.com",
-  "xing.com",
-  "xing.de",
-  # commerce hosts
-  "amazon.com",
-  "amazon.de",
-  "ebay.de",
-  "ebay.com",
-  "paypal.com",
-  "paypal.de",
-  # bulk sender
-  "sendgrid.com",
-  "sendgrid.net",
-  "mailchimp.com",
-  "exacttarget.com",
-  "cust-spf.exacttarget.com",
-  "constantcontact.com",
-  "icontact.com",
-  "mailgun.com",
-  "fishbowl.com",
-  "fbmta.com",
-  "mailjet.com",
-  "sparkpost.com",
-  "sparkpostmail.com",
-  # misc stuff
-  "github.com",
-]
+require 'rubygems'
 
 # collect networks to whitelist
 networks = []
 
 # parse parameters
-params = ARGV.getopts("o:f")
+params = ARGV.getopts("fi:l:o:")
+
+$logger = Logger.new($stderr)
+if params.has_key?("i") and params["l"].is_a?(String)
+  loglevel = params["l"]
+  begin
+    $logger.level = loglevel
+  rescue
+    $logger.error("invalid log level #{loglevel}")
+  end
+else
+  $logger.level = "DEBUG"
+end
+
+# input file
+if params.has_key?("i") and params["i"].is_a?(String)
+  domains = File.readlines(params["i"]).map(&:chomp)
+  $logger.debug(domains)
+else
+  $logger.error("no file to read domains from given")
+  exit(1)
+end
 
 # output file
 if params.has_key?("o") and params["o"].is_a?(String)
@@ -68,7 +45,8 @@ old_lines = 0
 begin
   old_lines = File.read(outfile).lines.count
 rescue Exception => e
-  true
+  $logger.warn("unable to read old output file #{outfile}, assuming -f")
+  params["f"] = true
 end
 
 def a(names, resolver)
@@ -77,6 +55,7 @@ def a(names, resolver)
     begin
       records = resolver.getresources(name, "AAAA") + resolver.getresources(name, "A")
     rescue Dnsruby::ResolvError, Timeout::Error
+      $logger.debug("no A result found for name #{name}")
       records = []
     end
     result += records.collect{|r| r.address.to_s.downcase}
@@ -88,6 +67,7 @@ def ptr(name, resolver)
   begin
     records = resolver.getresources(name, "PTR")
   rescue Dnsruby::ResolvError, Timeout::Error
+    $logger.debug("no PTR result found for name #{name}")
     records = []
   end
   return a(records.collect{|r| r.name}, resolver)
@@ -97,6 +77,7 @@ def mx(name, resolver)
   begin
     records = resolver.getresources(name, "MX")
   rescue Dnsruby::ResolvError, Timeout::Error
+    $logger.debug("no MX result found for name #{name}")
     records = []
   end
   return a(records.collect{|r| r.exchange}, resolver)
@@ -132,7 +113,7 @@ def get_spf_results(domain, resolver)
       elsif entry.match(/.all/)
         true
       else
-        # puts "ERROR: domain #{domain}, entry #{entry}"
+        $logger.debug("unable to parse DNS entry #{entry}")
       end
     end
   end
@@ -142,10 +123,17 @@ def get_spf_results(domain, resolver)
       i = IPAddress(r)
       i.network.address.to_s + "/" + i.network.prefix.to_s
     else
-      r
+      # let's see if this is a valid IP address at all
+      begin
+        IPAddress(r).to_s
+      rescue
+        $logger.info("skipping entry #{r}")
+        nil
+      end
     end
   end
-  return result.sort.uniq
+  $logger.debug(result)
+  return result.compact.sort.uniq
 end
 
 # generate resolver
@@ -157,9 +145,9 @@ spf_results = domains.collect{|d| get_spf_results(d, resolver)}.flatten.uniq.sor
 # compare number of results
 ratio = (old_lines.to_f / spf_results.count.to_f)
 if (ratio < 0.9 or ratio > 1.1) and old_lines > 0
-  puts "WARNING: More than 10% difference in number of results detected, old: #{old_lines}, new: #{spf_results.count}"
-  puts "Call with -f to force writing (this error message will be displayed anyways)"
+  $logger.warn("more than 10% difference in number of results detected, old: #{old_lines}, new: #{spf_results.count}")
   unless params.has_key?("f") and params["f"]
+    $logger.fatal("call with -f to force writing")
     exit 1
   end
 end
